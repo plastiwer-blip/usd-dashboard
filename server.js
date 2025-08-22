@@ -72,14 +72,21 @@ server.listen(PORT, () => {
 let browser;
 async function launchBrowser() {
   if (browser) return browser;
+
+  const pathFromPptr = puppeteer.executablePath(); // resuelto por Puppeteer
+
+  console.log('Chromium/Chrome path (pptr):', pathFromPptr); // para verificar en logs
+
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: puppeteer.executablePath(), // usa el navegador que se instaló en postinstall
+    executablePath: pathFromPptr,                 // ← USAR SIEMPRE ESTE PATH
     args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
   });
-  console.log('Puppeteer: usando executablePath() =>', puppeteer.executablePath());
+
+  console.log('Puppeteer: using executablePath()');
   return browser;
 }
+
 
 
 
@@ -141,6 +148,7 @@ function startBackgroundLoop() {
   // luego cada REFRESH_MS
   setInterval(runOnceSafe, REFRESH_MS);
 }
+
 
 
 
