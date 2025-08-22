@@ -72,18 +72,15 @@ server.listen(PORT, () => {
 let browser;
 async function launchBrowser() {
   if (browser) return browser;
-
-  // Usa el binario de Chromium que instala Puppeteer en el build
-  // (con postinstall: `npx puppeteer browsers install chromium`)
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: puppeteer.executablePath(),   // << CLAVE
+    executablePath: puppeteer.executablePath(),   // usa el Chromium que instala Puppeteer
     args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
   });
-  console.log('Puppeteer: usando executablePath()', browser.process() ? 'OK' : '');
-
+  console.log('Puppeteer: usando executablePath()');
   return browser;
 }
+
 
 
 async function runOnceSafe() {
@@ -143,4 +140,5 @@ function startBackgroundLoop() {
   // luego cada REFRESH_MS
   setInterval(runOnceSafe, REFRESH_MS);
 }
+
 
