@@ -4,9 +4,9 @@
   "license": "MIT",
   "engines": { "node": ">=18" },
   "scripts": {
-  "start": "node server.js",
-  "postinstall": "npx puppeteer browsers install chrome@stable"
-},
+    "start": "node server.js",
+    "postinstall": "npx puppeteer browsers install chrome@stable"
+  },
   "dependencies": {
     "express": "^4.19.2",
     "puppeteer": "^22.15.0",
