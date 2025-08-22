@@ -4,20 +4,22 @@ const http = require('http');
 const { Server } = require('socket.io');
 const puppeteer = require('puppeteer');
 const path = require('path');
+const fs = require('fs');
 
 const PORT = process.env.PORT || 3000;
 const REFRESH_MS = Number(process.env.REFRESH_MS || 5 * 60 * 1000);
 
-// ---- utils
+// ---------- utils ----------
 const parseNum = (txt) => {
-  const n = Number(String(txt || '').replace(/\s+/g,'').replace(',', '.'));
+  const n = Number(String(txt || '').replace(/\s+/g, '').replace(',', '.'));
   return Number.isFinite(n) ? n : NaN;
 };
 
-// ---- scrapers
-async function scrapeFintechAverages(page){
-  await page.goto('https://cuantoestaeldolar.pe', { waitUntil:'domcontentloaded', timeout: 60000 });
+// ---------- scrapers ----------
+async function scrapeFintechAverages(page) {
+  await page.goto('https://cuantoestaeldolar.pe', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('div[class*="ExchangeHouseItem_item__"]', { timeout: 60000 });
+
   const rows = await page.evaluate(() => {
     const items = document.querySelectorAll('div[class*="ExchangeHouseItem_item__"]');
     return Array.from(items).map(it => {
@@ -28,15 +30,18 @@ async function scrapeFintechAverages(page){
       return null;
     }).filter(Boolean);
   });
+
   const buys  = rows.map(r => parseNum(r.buy)).filter(n => Number.isFinite(n) && n > 0);
   const sells = rows.map(r => parseNum(r.sell)).filter(n => Number.isFinite(n) && n > 0);
+
   const bidAvg = buys.length  ? buys.reduce((a,b)=>a+b,0)/buys.length   : NaN;
   const askAvg = sells.length ? sells.reduce((a,b)=>a+b,0)/sells.length : NaN;
+
   return { bidAvg, askAvg, sampleCount: rows.length, raw: rows };
 }
 
-async function scrapeBloombergSpot(page){
-  await page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', { waitUntil:'networkidle2', timeout: 120000 });
+async function scrapeBloombergSpot(page) {
+  await page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', { waitUntil: 'networkidle2', timeout: 120000 });
   await page.waitForTimeout(3000);
   const val = await page.evaluate(() => {
     const el = document.querySelector('h2.px-last');
@@ -47,53 +52,70 @@ async function scrapeBloombergSpot(page){
   return Number.isFinite(val) ? Number(val.toFixed(4)) : NaN;
 }
 
-// ---- app (arranca YA)
+// ---------- servidor web (arranca YA para evitar 502) ----------
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// salud/diagnóstico
-app.get('/api/health', (_,res)=>res.json({ ok:true, started:true }));
+app.get('/api/health', (_, res) => res.json({ ok: true, started: true }));
 
 let liveSeries = [];
 io.on('connection', s => s.emit('boot', liveSeries));
 
-// abre puerto de inmediato (evita 502 por cold start)
 server.listen(PORT, () => {
   console.log(`✅ Server listening on http://localhost:${PORT}`);
-  // lanza el ciclo en background, sin bloquear arranque
-  startBackgroundLoop();
+  startBackgroundLoop(); // no bloquea el arranque
 });
 
-// ---- puppeteer + loop en background
-// ---- puppeteer + loop en background
+// ---------- Puppeteer: localizar binario de navegador ----------
+function findChromeInCache(root = '/opt/render/.cache/puppeteer') {
+  try {
+    if (!fs.existsSync(root)) return null;
+    const stack = [root];
+    while (stack.length) {
+      const dir = stack.pop();
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const e of entries) {
+        const p = path.join(dir, e.name);
+        if (e.isDirectory()) stack.push(p);
+        else if (e.isFile() && e.name === 'chrome') return p; // ejecutable
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
 let browser;
 async function launchBrowser() {
   if (browser) return browser;
 
-  const pathFromPptr = puppeteer.executablePath(); // resuelto por Puppeteer
+  // 1) Ruta que resuelve Puppeteer (debería apuntar al Chrome/Chromium instalado en el build)
+  let execPath = puppeteer.executablePath();
 
-  console.log('Chromium/Chrome path (pptr):', pathFromPptr); // para verificar en logs
+  // 2) Si viene vacía/incorrecta, recorremos la caché para hallar el binario
+  if (!execPath || !fs.existsSync(execPath)) {
+    const found = findChromeInCache();
+    if (found) execPath = found;
+  }
+
+  console.log('➡️  executablePath seleccionado:', execPath || '(vacío)');
 
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: pathFromPptr,                 // ← USAR SIEMPRE ESTE PATH
+    executablePath: execPath || undefined,
     args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
   });
 
-  console.log('Puppeteer: using executablePath()');
+  console.log('✅ Puppeteer lanzado');
   return browser;
 }
 
-
-
-
-
+// ---------- ciclo en background ----------
 async function runOnceSafe() {
   const ts = new Date();
-  let bidAvg=NaN, askAvg=NaN, spot=NaN, fin=null, sampleCount=0;
+  let bidAvg = NaN, askAvg = NaN, spot = NaN, fin = null, sampleCount = 0;
 
   try {
     const b = await launchBrowser();
@@ -111,18 +133,19 @@ async function runOnceSafe() {
       spot = await scrapeBloombergSpot(page);
     } catch (e) { console.error('Bloomberg error:', e.message); }
 
-    await page.close().catch(()=>{});
+    await page.close().catch(() => {});
   } catch (e) {
     console.error('Tick fatal:', e);
   }
 
-  let bestBuy=null, bestSell=null;
+  let bestBuy = null, bestSell = null;
   if (fin && fin.raw?.length) {
-    bestBuy  = fin.raw.map(f => ({ name:f.name, buy:  parseNum(f.sell) }))
-                      .filter(f => Number.isFinite(f.buy)  && f.buy>0)
+    bestBuy  = fin.raw.map(f => ({ name: f.name, buy:  parseNum(f.sell) }))
+                      .filter(f => Number.isFinite(f.buy)  && f.buy  > 0)
                       .sort((a,b)=>a.buy-b.buy)[0] || null;
-    bestSell = fin.raw.map(f => ({ name:f.name, sell: parseNum(f.buy) }))
-                      .filter(f => Number.isFinite(f.sell) && f.sell>0)
+
+    bestSell = fin.raw.map(f => ({ name: f.name, sell: parseNum(f.buy)  }))
+                      .filter(f => Number.isFinite(f.sell) && f.sell > 0)
                       .sort((a,b)=>b.sell-a.sell)[0] || null;
   }
 
@@ -135,7 +158,7 @@ async function runOnceSafe() {
   };
 
   const today = new Date().toISOString().split('T')[0];
-  liveSeries = liveSeries.filter(p => (p.timestamp||p.ts).split('T')[0] === today);
+  liveSeries = liveSeries.filter(p => (p.timestamp || p.ts).split('T')[0] === today);
   liveSeries.push(point);
   if (liveSeries.length > 2000) liveSeries.shift();
 
@@ -143,13 +166,6 @@ async function runOnceSafe() {
 }
 
 function startBackgroundLoop() {
-  // primer intento “sin bloquear”
-  runOnceSafe();
-  // luego cada REFRESH_MS
-  setInterval(runOnceSafe, REFRESH_MS);
+  runOnceSafe();                    // primer tick
+  setInterval(runOnceSafe, REFRESH_MS); // siguientes
 }
-
-
-
-
-
