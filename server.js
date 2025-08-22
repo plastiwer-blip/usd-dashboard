@@ -68,26 +68,23 @@ server.listen(PORT, () => {
 });
 
 // ---- puppeteer + loop en background
+// ---- puppeteer + loop en background
 let browser;
 async function launchBrowser() {
   if (browser) return browser;
-  try {
-    browser = await puppeteer.launch({
-      headless: true,
-      channel: 'chrome', // usa Chrome instalado en postinstall
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
-    });
-    console.log('Puppeteer: channel=chrome');
-  } catch (e1) {
-    console.warn('Chrome channel failed, fallback to bundled Chromium:', e1.message);
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
-    });
-    console.log('Puppeteer: bundled Chromium');
-  }
+
+  // Usa el binario de Chromium que instala Puppeteer en el build
+  // (con postinstall: `npx puppeteer browsers install chromium`)
+  browser = await puppeteer.launch({
+    headless: true,
+    executablePath: puppeteer.executablePath(),   // << CLAVE
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
+  });
+  console.log('Puppeteer: usando executablePath()', browser.process() ? 'OK' : '');
+
   return browser;
 }
+
 
 async function runOnceSafe() {
   const ts = new Date();
@@ -146,3 +143,4 @@ function startBackgroundLoop() {
   // luego cada REFRESH_MS
   setInterval(runOnceSafe, REFRESH_MS);
 }
+
