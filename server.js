@@ -71,13 +71,11 @@ server.listen(PORT, () => {
 // ---- puppeteer + loop en background
 let browser;
 async function launchBrowser() {
-  if (browser) return browser;
-  browser = await puppeteer.launch({
-    headless: true,
-    executablePath: puppeteer.executablePath(),   // usa el Chromium que instala Puppeteer
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    executablePath: puppeteer.executablePath(),  // 👈 fuerza Chromium
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
   });
-  console.log('Puppeteer: usando executablePath()');
   return browser;
 }
 
@@ -140,5 +138,6 @@ function startBackgroundLoop() {
   // luego cada REFRESH_MS
   setInterval(runOnceSafe, REFRESH_MS);
 }
+
 
 
