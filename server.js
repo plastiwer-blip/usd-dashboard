@@ -1,4 +1,4 @@
-// server.js — arranque inmediato + scraping en background (sin Excel)
+// server.js — web + scraping en background (sin Excel), listo para Render
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -10,16 +10,35 @@ const PORT = process.env.PORT || 3000;
 const REFRESH_MS = Number(process.env.REFRESH_MS || 5 * 60 * 1000);
 const PUP_CACHE = process.env.PUPPETEER_CACHE_DIR || '/opt/render/project/.cache/puppeteer';
 
-// ---------- utils ----------
+/* ------------------------------ utils ----------------------------------- */
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const parseNum = (txt) => {
   const n = Number(String(txt || '').replace(/\s+/g, '').replace(',', '.'));
   return Number.isFinite(n) ? n : NaN;
 };
+async function withRetries(fn, retries = 2, delayMs = 2000) {
+  let lastErr;
+  for (let i = 0; i <= retries; i++) {
+    try { return await fn(); }
+    catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(delayMs * (i + 1));
+    }
+  }
+  throw lastErr;
+}
 
-// ---------- scrapers ----------
+/* ------------------------------ scrapers -------------------------------- */
 async function scrapeFintechAverages(page) {
-  await page.goto('https://cuantoestaeldolar.pe', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForSelector('div[class*="ExchangeHouseItem_item__"]', { timeout: 60000 });
+  // Cargar página y esperar los items con reintentos
+  await withRetries(
+    () => page.goto('https://cuantoestaeldolar.pe', { waitUntil: 'domcontentloaded', timeout: 90000 }),
+    2
+  );
+  await withRetries(
+    () => page.waitForSelector('div[class*="ExchangeHouseItem_item__"]', { timeout: 90000 }),
+    2
+  );
 
   const rows = await page.evaluate(() => {
     const items = document.querySelectorAll('div[class*="ExchangeHouseItem_item__"]');
@@ -42,13 +61,14 @@ async function scrapeFintechAverages(page) {
 }
 
 async function scrapeBloombergSpot(page) {
-  await page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', {
-    waitUntil: 'networkidle2',
-    timeout: 120000
-  });
-
-  // esperar a que aparezca el elemento en vez de usar waitForTimeout
-  await page.waitForSelector('h2.px-last', { timeout: 15000 });
+  await withRetries(
+    () => page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', { waitUntil: 'domcontentloaded', timeout: 120000 }),
+    2
+  );
+  await withRetries(
+    () => page.waitForSelector('h2.px-last', { timeout: 20000 }),
+    1
+  );
 
   const val = await page.evaluate(() => {
     const el = document.querySelector('h2.px-last');
@@ -60,21 +80,29 @@ async function scrapeBloombergSpot(page) {
   return Number.isFinite(val) ? Number(val.toFixed(4)) : NaN;
 }
 
-// ---------- servidor web ----------
+/* ------------------------------ web server ------------------------------ */
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
-// sirve assets estáticos desde /public
+// estáticos desde /public (css/js/img del front)
 app.use(express.static(path.join(__dirname, 'public')));
 
-// sirve index.html que está en la raíz del proyecto
-app.get('/', (req, res) => {
+// index.html en la raíz del proyecto
+app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// health check
-app.get('/api/health', (_, res) => res.json({ ok: true, started: true }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, started: true }));
+
+// endpoint opcional para depurar dónde está el chrome
+app.get('/debug-cache', (_req, res) => {
+  res.json({
+    cacheDir: PUP_CACHE,
+    exists: fs.existsSync(PUP_CACHE),
+    children: fs.existsSync(PUP_CACHE) ? fs.readdirSync(PUP_CACHE) : []
+  });
+});
 
 let liveSeries = [];
 io.on('connection', s => s.emit('boot', liveSeries));
@@ -84,7 +112,7 @@ server.listen(PORT, () => {
   startBackgroundLoop();
 });
 
-// ---------- Puppeteer ----------
+/* ------------------------------ puppeteer ------------------------------- */
 function findNewestChrome(root = PUP_CACHE) {
   try {
     const chromeRoot = path.join(root, 'chrome');
@@ -102,14 +130,12 @@ function findNewestChrome(root = PUP_CACHE) {
     if (!candidates.length) return null;
     candidates.sort((a, b) => a.ver.localeCompare(b.ver, undefined, { numeric: true })).reverse();
     return candidates[0].exec;
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 function resolveExecutablePath() {
-  let execPath = puppeteer.executablePath();
-  if (execPath && fs.existsSync(execPath)) return execPath;
+  let p = puppeteer.executablePath();
+  if (p && fs.existsSync(p)) return p;
   const newest = findNewestChrome();
   if (newest) return newest;
   return null;
@@ -119,11 +145,12 @@ let browser;
 async function launchBrowser() {
   if (browser) return browser;
 
+  // 1) Prueba canal "chrome" si existe
   try {
     browser = await puppeteer.launch({
       headless: true,
       channel: 'chrome',
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+      args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
     });
     console.log('✅ Puppeteer lanzado (channel=chrome)');
     return browser;
@@ -131,25 +158,23 @@ async function launchBrowser() {
     console.warn('channel=chrome no disponible:', e.message);
   }
 
+  // 2) Fallback al ejecutable detectado
   const execPath = resolveExecutablePath();
   console.log('➡️ executablePath seleccionado:', execPath || '(no encontrado)');
-
   if (!execPath) {
-    throw new Error(`No se encontró Chrome. Asegúrate de instalarlo en build con:
-npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR`);
+    throw new Error('Chrome no encontrado. Instálalo en build con @puppeteer/browsers y PUPPETEER_CACHE_DIR.');
   }
 
   browser = await puppeteer.launch({
     headless: true,
     executablePath: execPath,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
   });
-
   console.log('✅ Puppeteer lanzado (executablePath)');
   return browser;
 }
 
-// ---------- ciclo en background ----------
+/* ------------------------- background tick loop ------------------------- */
 async function runOnceSafe() {
   const ts = new Date();
   let bidAvg = NaN, askAvg = NaN, spot = NaN, fin = null, sampleCount = 0;
@@ -157,18 +182,37 @@ async function runOnceSafe() {
   try {
     const b = await launchBrowser();
     const page = await b.newPage();
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
-    );
+
+    // timeouts altos
+    page.setDefaultTimeout(120000);
+    page.setDefaultNavigationTimeout(120000);
+
+    // UA y headers
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36');
+    await page.setExtraHTTPHeaders({ 'accept-language': 'es-PE,es;q=0.9,en;q=0.8' });
+
+    // bloquear recursos pesados/trackers para acelerar
+    await page.route('**/*', route => {
+      const req = route.request();
+      const type = req.resourceType();
+      const url = req.url();
+      if (['image','media','font'].includes(type)) return route.abort();
+      if (/\b(googletagmanager|google-analytics|doubleclick|facebook\.net)\b/i.test(url)) return route.abort();
+      return route.continue();
+    });
 
     try {
       fin = await scrapeFintechAverages(page);
       bidAvg = fin.bidAvg; askAvg = fin.askAvg; sampleCount = fin.sampleCount;
-    } catch (e) { console.error('Fintech error:', e.message); }
+    } catch (e) {
+      console.error('Fintech error:', e.name || e.code || e.message);
+    }
 
     try {
       spot = await scrapeBloombergSpot(page);
-    } catch (e) { console.error('Bloomberg error:', e.message); }
+    } catch (e) {
+      console.error('Bloomberg error:', e.name || e.code || e.message);
+    }
 
     await page.close().catch(() => {});
   } catch (e) {
@@ -177,10 +221,12 @@ async function runOnceSafe() {
 
   let bestBuy = null, bestSell = null;
   if (fin && fin.raw?.length) {
-    bestBuy  = fin.raw.map(f => ({ name: f.name, buy: parseNum(f.sell) }))
+    // mejor compra = menor precio de venta (sell) para ti
+    bestBuy  = fin.raw.map(f => ({ name: f.name, buy:  parseNum(f.sell) }))
                       .filter(f => Number.isFinite(f.buy) && f.buy > 0)
                       .sort((a,b)=>a.buy-b.buy)[0] || null;
 
+    // mejor venta = mayor precio de compra (buy) que te pagan a ti
     bestSell = fin.raw.map(f => ({ name: f.name, sell: parseNum(f.buy) }))
                       .filter(f => Number.isFinite(f.sell) && f.sell > 0)
                       .sort((a,b)=>b.sell-a.sell)[0] || null;
@@ -203,7 +249,7 @@ async function runOnceSafe() {
 }
 
 function startBackgroundLoop() {
-  runOnceSafe();
+  runOnceSafe();                    // primer tick inmediato
   setInterval(runOnceSafe, REFRESH_MS);
 }
 
@@ -214,7 +260,6 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     process.exit(0);
   });
 }
-
 
 
 
