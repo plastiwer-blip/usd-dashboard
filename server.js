@@ -91,26 +91,60 @@ let browser;
 async function launchBrowser() {
   if (browser) return browser;
 
-  // 1) Ruta que resuelve Puppeteer (debería apuntar al Chrome/Chromium instalado en el build)
-  let execPath = puppeteer.executablePath();
+  // 1) Primero intenta usar el Chrome instalado (canal "chrome")
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      channel: 'chrome', // usa el Chrome instalado por @puppeteer/browsers
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    });
+    console.log('✅ Puppeteer lanzado (channel=chrome)');
+    return browser;
+  } catch (e) {
+    console.warn('No se pudo lanzar con channel=chrome, probando executablePath…', e.message);
+  }
 
-  // 2) Si viene vacía/incorrecta, recorremos la caché para hallar el binario
+  // 2) Luego intenta con la ruta que resuelve Puppeteer
+  let execPath = puppeteer.executablePath();
   if (!execPath || !fs.existsSync(execPath)) {
-    const found = findChromeInCache();
+    // 3) Fallback: busca el binario en la caché de Render
+    const root = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
+    const found = (function findChromeInCache(rootDir) {
+      try {
+        if (!fs.existsSync(rootDir)) return null;
+        const stack = [rootDir];
+        while (stack.length) {
+          const dir = stack.pop();
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            const p = path.join(dir, e.name);
+            if (e.isDirectory()) stack.push(p);
+            else if (e.isFile() && (e.name === 'chrome' || e.name === 'chromium')) return p;
+          }
+        }
+      } catch (_) {}
+      return null;
+    })(root);
     if (found) execPath = found;
   }
 
-  console.log('➡️  executablePath seleccionado:', execPath || '(vacío)');
+  console.log('➡️ executablePath seleccionado:', execPath || '(vacío)');
+  if (!execPath || !fs.existsSync(execPath)) {
+    throw new Error(
+      'No se encontró Chrome. Asegúrate de instalarlo en build con: ' +
+      'npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR'
+    );
+  }
 
   browser = await puppeteer.launch({
     headless: true,
-    executablePath: execPath || undefined,
-    args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage']
+    executablePath: execPath,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
-
-  console.log('✅ Puppeteer lanzado');
+  console.log('✅ Puppeteer lanzado (executablePath)');
   return browser;
 }
+
 
 // ---------- ciclo en background ----------
 async function runOnceSafe() {
@@ -169,3 +203,4 @@ function startBackgroundLoop() {
   runOnceSafe();                    // primer tick
   setInterval(runOnceSafe, REFRESH_MS); // siguientes
 }
+
