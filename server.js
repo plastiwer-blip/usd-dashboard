@@ -42,16 +42,24 @@ async function scrapeFintechAverages(page) {
 }
 
 async function scrapeBloombergSpot(page) {
-  await page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', { waitUntil: 'networkidle2', timeout: 120000 });
-  await page.waitForTimeout(3000);
+  await page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', {
+    waitUntil: 'networkidle2', // OK en Puppeteer 22
+    timeout: 120000
+  });
+
+  // Espera explícita a que aparezca el precio
+  await page.waitForSelector('h2.px-last', { timeout: 15000 });
+
   const val = await page.evaluate(() => {
     const el = document.querySelector('h2.px-last');
     if (!el) return null;
     const n = parseFloat(el.textContent.trim().replace(',', '.'));
     return Number.isFinite(n) ? n : null;
   });
+
   return Number.isFinite(val) ? Number(val.toFixed(4)) : NaN;
 }
+
 
 // ---------- servidor web (arranca YA para evitar 502) ----------
 const app = express();
@@ -224,5 +232,6 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     process.exit(0);
   });
 }
+
 
 
