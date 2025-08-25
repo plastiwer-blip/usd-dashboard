@@ -43,11 +43,11 @@ async function scrapeFintechAverages(page) {
 
 async function scrapeBloombergSpot(page) {
   await page.goto('https://www.bloomberglinea.com/quote/USDPEN:CUR/', {
-    waitUntil: 'networkidle2', // OK en Puppeteer 22
+    waitUntil: 'networkidle2',
     timeout: 120000
   });
 
-  // Espera explícita a que aparezca el precio
+  // esperar a que aparezca el elemento en vez de usar waitForTimeout
   await page.waitForSelector('h2.px-last', { timeout: 15000 });
 
   const val = await page.evaluate(() => {
@@ -60,37 +60,33 @@ async function scrapeBloombergSpot(page) {
   return Number.isFinite(val) ? Number(val.toFixed(4)) : NaN;
 }
 
-
-// ---------- servidor web (arranca YA para evitar 502) ----------
+// ---------- servidor web ----------
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
+// sirve assets estáticos desde /public
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.get('/api/health', (_, res) => res.json({ ok: true, started: true }));
-
-// endpoint opcional de depuración
-app.get('/debug-cache', (_, res) => {
-  res.json({
-    PUPPETEER_CACHE_DIR: PUP_CACHE,
-    exists: fs.existsSync(PUP_CACHE),
-    subfolders: fs.existsSync(PUP_CACHE) ? fs.readdirSync(PUP_CACHE) : []
-  });
+// sirve index.html que está en la raíz del proyecto
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
+
+// health check
+app.get('/api/health', (_, res) => res.json({ ok: true, started: true }));
 
 let liveSeries = [];
 io.on('connection', s => s.emit('boot', liveSeries));
 
 server.listen(PORT, () => {
   console.log(`✅ Server listening on http://localhost:${PORT}`);
-  startBackgroundLoop(); // no bloquea el arranque
+  startBackgroundLoop();
 });
 
-// ---------- Puppeteer: localizar binario de navegador ----------
+// ---------- Puppeteer ----------
 function findNewestChrome(root = PUP_CACHE) {
   try {
-    // estructura esperada: <root>/chrome/linux-<version>/chrome-linux64/chrome
     const chromeRoot = path.join(root, 'chrome');
     if (!fs.existsSync(chromeRoot)) return null;
 
@@ -104,8 +100,6 @@ function findNewestChrome(root = PUP_CACHE) {
       .filter(c => fs.existsSync(c.exec));
 
     if (!candidates.length) return null;
-
-    // Ordenar por versión de mayor a menor (comparación numérica)
     candidates.sort((a, b) => a.ver.localeCompare(b.ver, undefined, { numeric: true })).reverse();
     return candidates[0].exec;
   } catch {
@@ -114,15 +108,10 @@ function findNewestChrome(root = PUP_CACHE) {
 }
 
 function resolveExecutablePath() {
-  // 1) Lo que resuelva Puppeteer (si viene empaquetado)
   let execPath = puppeteer.executablePath();
   if (execPath && fs.existsSync(execPath)) return execPath;
-
-  // 2) Lo más nuevo en la caché del proyecto
   const newest = findNewestChrome();
   if (newest) return newest;
-
-  // 3) Nada encontrado
   return null;
 }
 
@@ -130,7 +119,6 @@ let browser;
 async function launchBrowser() {
   if (browser) return browser;
 
-  // 1) Intentar canal 'chrome' (en entornos donde exista)
   try {
     browser = await puppeteer.launch({
       headless: true,
@@ -143,16 +131,12 @@ async function launchBrowser() {
     console.warn('channel=chrome no disponible:', e.message);
   }
 
-  // 2) Fallback: usar ejecutable resuelto
   const execPath = resolveExecutablePath();
   console.log('➡️ executablePath seleccionado:', execPath || '(no encontrado)');
 
   if (!execPath) {
-    throw new Error(
-      `No se encontró Chrome. Instálalo en el build con:
-npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR
-(donde PUPPETEER_CACHE_DIR debe apuntar a /opt/render/project/.cache/puppeteer)`
-    );
+    throw new Error(`No se encontró Chrome. Asegúrate de instalarlo en build con:
+npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR`);
   }
 
   browser = await puppeteer.launch({
@@ -173,8 +157,6 @@ async function runOnceSafe() {
   try {
     const b = await launchBrowser();
     const page = await b.newPage();
-
-    // UA genérico estable
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
     );
@@ -195,11 +177,11 @@ async function runOnceSafe() {
 
   let bestBuy = null, bestSell = null;
   if (fin && fin.raw?.length) {
-    bestBuy  = fin.raw.map(f => ({ name: f.name, buy:  parseNum(f.sell) }))
-                      .filter(f => Number.isFinite(f.buy)  && f.buy  > 0)
+    bestBuy  = fin.raw.map(f => ({ name: f.name, buy: parseNum(f.sell) }))
+                      .filter(f => Number.isFinite(f.buy) && f.buy > 0)
                       .sort((a,b)=>a.buy-b.buy)[0] || null;
 
-    bestSell = fin.raw.map(f => ({ name: f.name, sell: parseNum(f.buy)  }))
+    bestSell = fin.raw.map(f => ({ name: f.name, sell: parseNum(f.buy) }))
                       .filter(f => Number.isFinite(f.sell) && f.sell > 0)
                       .sort((a,b)=>b.sell-a.sell)[0] || null;
   }
@@ -221,17 +203,19 @@ async function runOnceSafe() {
 }
 
 function startBackgroundLoop() {
-  runOnceSafe();                         // primer tick
-  setInterval(runOnceSafe, REFRESH_MS);  // siguientes
+  runOnceSafe();
+  setInterval(runOnceSafe, REFRESH_MS);
 }
 
-// cierre limpio del navegador
+// cierre limpio
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, async () => {
     try { if (browser) await browser.close(); } catch {}
     process.exit(0);
   });
 }
+
+
 
 
 
