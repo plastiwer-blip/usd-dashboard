@@ -4,8 +4,7 @@
   "license": "MIT",
   "engines": { "node": ">=18" },
   "scripts": {
-    "start": "node server.js",
-    "postinstall": "npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -13,6 +12,8 @@
     "socket.io": "^4.7.5"
   }
 }
+
+
 
 
 
