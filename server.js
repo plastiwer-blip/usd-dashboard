@@ -8,6 +8,7 @@ const fs = require('fs');
 
 const PORT = process.env.PORT || 3000;
 const REFRESH_MS = Number(process.env.REFRESH_MS || 5 * 60 * 1000);
+const PUP_CACHE = process.env.PUPPETEER_CACHE_DIR || '/opt/render/project/.cache/puppeteer';
 
 // ---------- utils ----------
 const parseNum = (txt) => {
@@ -61,6 +62,15 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (_, res) => res.json({ ok: true, started: true }));
 
+// endpoint opcional de depuración
+app.get('/debug-cache', (_, res) => {
+  res.json({
+    PUPPETEER_CACHE_DIR: PUP_CACHE,
+    exists: fs.existsSync(PUP_CACHE),
+    subfolders: fs.existsSync(PUP_CACHE) ? fs.readdirSync(PUP_CACHE) : []
+  });
+});
+
 let liveSeries = [];
 io.on('connection', s => s.emit('boot', liveSeries));
 
@@ -70,20 +80,41 @@ server.listen(PORT, () => {
 });
 
 // ---------- Puppeteer: localizar binario de navegador ----------
-function findChromeInCache(root = '/opt/render/.cache/puppeteer') {
+function findNewestChrome(root = PUP_CACHE) {
   try {
-    if (!fs.existsSync(root)) return null;
-    const stack = [root];
-    while (stack.length) {
-      const dir = stack.pop();
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const e of entries) {
-        const p = path.join(dir, e.name);
-        if (e.isDirectory()) stack.push(p);
-        else if (e.isFile() && e.name === 'chrome') return p; // ejecutable
-      }
-    }
-  } catch (_) {}
+    // estructura esperada: <root>/chrome/linux-<version>/chrome-linux64/chrome
+    const chromeRoot = path.join(root, 'chrome');
+    if (!fs.existsSync(chromeRoot)) return null;
+
+    const candidates = fs.readdirSync(chromeRoot)
+      .filter(name => name.startsWith('linux-'))
+      .map(name => {
+        const ver = name.replace('linux-', '');
+        const exec = path.join(chromeRoot, name, 'chrome-linux64', 'chrome');
+        return { ver, exec };
+      })
+      .filter(c => fs.existsSync(c.exec));
+
+    if (!candidates.length) return null;
+
+    // Ordenar por versión de mayor a menor (comparación numérica)
+    candidates.sort((a, b) => a.ver.localeCompare(b.ver, undefined, { numeric: true })).reverse();
+    return candidates[0].exec;
+  } catch {
+    return null;
+  }
+}
+
+function resolveExecutablePath() {
+  // 1) Lo que resuelva Puppeteer (si viene empaquetado)
+  let execPath = puppeteer.executablePath();
+  if (execPath && fs.existsSync(execPath)) return execPath;
+
+  // 2) Lo más nuevo en la caché del proyecto
+  const newest = findNewestChrome();
+  if (newest) return newest;
+
+  // 3) Nada encontrado
   return null;
 }
 
@@ -91,48 +122,28 @@ let browser;
 async function launchBrowser() {
   if (browser) return browser;
 
-  // 1) Primero intenta usar el Chrome instalado (canal "chrome")
+  // 1) Intentar canal 'chrome' (en entornos donde exista)
   try {
     browser = await puppeteer.launch({
       headless: true,
-      channel: 'chrome', // usa el Chrome instalado por @puppeteer/browsers
+      channel: 'chrome',
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     });
     console.log('✅ Puppeteer lanzado (channel=chrome)');
     return browser;
   } catch (e) {
-    console.warn('No se pudo lanzar con channel=chrome, probando executablePath…', e.message);
+    console.warn('channel=chrome no disponible:', e.message);
   }
 
-  // 2) Luego intenta con la ruta que resuelve Puppeteer
-  let execPath = puppeteer.executablePath();
-  if (!execPath || !fs.existsSync(execPath)) {
-    // 3) Fallback: busca el binario en la caché de Render
-    const root = process.env.PUPPETEER_CACHE_DIR || '/opt/render/.cache/puppeteer';
-    const found = (function findChromeInCache(rootDir) {
-      try {
-        if (!fs.existsSync(rootDir)) return null;
-        const stack = [rootDir];
-        while (stack.length) {
-          const dir = stack.pop();
-          const entries = fs.readdirSync(dir, { withFileTypes: true });
-          for (const e of entries) {
-            const p = path.join(dir, e.name);
-            if (e.isDirectory()) stack.push(p);
-            else if (e.isFile() && (e.name === 'chrome' || e.name === 'chromium')) return p;
-          }
-        }
-      } catch (_) {}
-      return null;
-    })(root);
-    if (found) execPath = found;
-  }
+  // 2) Fallback: usar ejecutable resuelto
+  const execPath = resolveExecutablePath();
+  console.log('➡️ executablePath seleccionado:', execPath || '(no encontrado)');
 
-  console.log('➡️ executablePath seleccionado:', execPath || '(vacío)');
-  if (!execPath || !fs.existsSync(execPath)) {
+  if (!execPath) {
     throw new Error(
-      'No se encontró Chrome. Asegúrate de instalarlo en build con: ' +
-      'npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR'
+      `No se encontró Chrome. Instálalo en el build con:
+npx @puppeteer/browsers install chrome@stable --path=$PUPPETEER_CACHE_DIR
+(donde PUPPETEER_CACHE_DIR debe apuntar a /opt/render/project/.cache/puppeteer)`
     );
   }
 
@@ -141,10 +152,10 @@ async function launchBrowser() {
     executablePath: execPath,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
   });
+
   console.log('✅ Puppeteer lanzado (executablePath)');
   return browser;
 }
-
 
 // ---------- ciclo en background ----------
 async function runOnceSafe() {
@@ -154,6 +165,8 @@ async function runOnceSafe() {
   try {
     const b = await launchBrowser();
     const page = await b.newPage();
+
+    // UA genérico estable
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
     );
@@ -200,7 +213,16 @@ async function runOnceSafe() {
 }
 
 function startBackgroundLoop() {
-  runOnceSafe();                    // primer tick
-  setInterval(runOnceSafe, REFRESH_MS); // siguientes
+  runOnceSafe();                         // primer tick
+  setInterval(runOnceSafe, REFRESH_MS);  // siguientes
 }
+
+// cierre limpio del navegador
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, async () => {
+    try { if (browser) await browser.close(); } catch {}
+    process.exit(0);
+  });
+}
+
 
