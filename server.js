@@ -1,4 +1,4 @@
-// server.js — web + scraping en background (sin Excel), listo para Render
+// server.js — web + scraping en background (Render-ready, sin Excel)
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -30,7 +30,6 @@ async function withRetries(fn, retries = 2, delayMs = 2000) {
 
 /* ------------------------------ scrapers -------------------------------- */
 async function scrapeFintechAverages(page) {
-  // Cargar página y esperar los items con reintentos
   await withRetries(
     () => page.goto('https://cuantoestaeldolar.pe', { waitUntil: 'domcontentloaded', timeout: 90000 }),
     2
@@ -93,9 +92,10 @@ app.get('/', (_req, res) => {
   res.sendFile(path.join(__dirname, 'index.html'));
 });
 
+// health check
 app.get('/api/health', (_req, res) => res.json({ ok: true, started: true }));
 
-// endpoint opcional para depurar dónde está el chrome
+// debug opcional
 app.get('/debug-cache', (_req, res) => {
   res.json({
     cacheDir: PUP_CACHE,
@@ -145,7 +145,7 @@ let browser;
 async function launchBrowser() {
   if (browser) return browser;
 
-  // 1) Prueba canal "chrome" si existe
+  // 1) intentar canal 'chrome'
   try {
     browser = await puppeteer.launch({
       headless: true,
@@ -158,7 +158,7 @@ async function launchBrowser() {
     console.warn('channel=chrome no disponible:', e.message);
   }
 
-  // 2) Fallback al ejecutable detectado
+  // 2) fallback al ejecutable detectado
   const execPath = resolveExecutablePath();
   console.log('➡️ executablePath seleccionado:', execPath || '(no encontrado)');
   if (!execPath) {
@@ -191,14 +191,15 @@ async function runOnceSafe() {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36');
     await page.setExtraHTTPHeaders({ 'accept-language': 'es-PE,es;q=0.9,en;q=0.8' });
 
-    // bloquear recursos pesados/trackers para acelerar
-    await page.route('**/*', route => {
-      const req = route.request();
+    // ✅ Interceptar requests (Puppeteer)
+    await page.setRequestInterception(true);
+    page.removeAllListeners('request');
+    page.on('request', (req) => {
       const type = req.resourceType();
-      const url = req.url();
-      if (['image','media','font'].includes(type)) return route.abort();
-      if (/\b(googletagmanager|google-analytics|doubleclick|facebook\.net)\b/i.test(url)) return route.abort();
-      return route.continue();
+      const url  = req.url();
+      if (['image','media','font'].includes(type)) return req.abort();
+      if (/\b(googletagmanager|google-analytics|doubleclick|facebook\.net)\b/i.test(url)) return req.abort();
+      return req.continue();
     });
 
     try {
@@ -219,14 +220,13 @@ async function runOnceSafe() {
     console.error('Tick fatal:', e);
   }
 
+  // mejor compra/venta
   let bestBuy = null, bestSell = null;
   if (fin && fin.raw?.length) {
-    // mejor compra = menor precio de venta (sell) para ti
     bestBuy  = fin.raw.map(f => ({ name: f.name, buy:  parseNum(f.sell) }))
                       .filter(f => Number.isFinite(f.buy) && f.buy > 0)
                       .sort((a,b)=>a.buy-b.buy)[0] || null;
 
-    // mejor venta = mayor precio de compra (buy) que te pagan a ti
     bestSell = fin.raw.map(f => ({ name: f.name, sell: parseNum(f.buy) }))
                       .filter(f => Number.isFinite(f.sell) && f.sell > 0)
                       .sort((a,b)=>b.sell-a.sell)[0] || null;
@@ -260,6 +260,8 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     process.exit(0);
   });
 }
+
+
 
 
 
